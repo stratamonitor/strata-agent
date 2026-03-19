@@ -1,0 +1,8 @@
+streamlit
+plotly
+pandas
+pyinstaller
+pytest
+# Эти библиотеки нужны Streamlit, но лучше дать pip решить версии:
+pyarrow
+numpy
