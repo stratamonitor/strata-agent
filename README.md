@@ -14,7 +14,7 @@ Strata is a portable, zero-dependency tool that helps you instantly find what's 
 
 But the real magic? **You can chat with your storage.** Connect Strata to the cloud and use Natural Language to query your file system using AI (Text-to-SQL).
 
-![Strata Dashboard Screenshot](https://via.placeholder.com/800x450.png?text=Add+a+Screenshot+of+your+Sunburst+Chart+Here)
+![Strata Dashboard Screenshot](https://github.com/georgiykirillov/strata-agent/blob/main/img/strata_gui.jpg?text=strata_gui_screenshot)
 
 ## ✨ Features
 
