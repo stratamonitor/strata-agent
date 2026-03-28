@@ -2,12 +2,12 @@ name: Build and Release Strata
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main" ]
     # Пайплайн будет реагировать на создание тэгов (например, v0.9.31)
     tags:
       - 'v*'
   pull_request:
-    branches:[ "main", "master" ]
+    branches:[ "main" ]
 
 jobs:
   test:
