@@ -13,7 +13,7 @@ import socket
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-__VERSION__ = "1.0.1"
+__VERSION__ = "1.0.2"
 DEFAULT_SERVER_URL = "https://api.stratamonitor.com/api/v1/agent/sync"
 
 def log(msg):

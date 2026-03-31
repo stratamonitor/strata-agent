@@ -104,7 +104,7 @@ def get_targets(conn):
 def get_snapshots(conn, root_path):
     return pd.read_sql("SELECT id, timestamp, total_size_bytes, disk_total_bytes, disk_free_bytes FROM scans WHERE root_path = ? ORDER BY id DESC", conn, params=(root_path,))
 
-# NEW: Cached Update Checker (TTL 1 Hour)
+# Cached Update Checker (TTL 1 Hour)
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_update_info(current_version):
     return strata.check_for_updates(current_version)
@@ -125,7 +125,7 @@ def render_sidebar(conn):
     
     st.sidebar.subheader("Actions")
     
-    if st.sidebar.button("Start Initial Scan" if is_new else "Scan Now", type="primary" if is_new else "secondary"):
+    if st.sidebar.button("Scan Now" if not is_new else "Start Initial Scan", type="primary" if is_new else "secondary"):
         if not target_path: st.sidebar.error("Empty path!")
         else:
             status_text = st.sidebar.empty()
@@ -134,40 +134,37 @@ def render_sidebar(conn):
 
             with st.spinner(f"Scanning {target_path}..."):
                 config = get_config(); db = config.get("General", "db_path", fallback="strata.db")
-                exc_str = config.get("General", "exclude", fallback=""); excludes =[e.strip() for e in exc_str.split(",") if e.strip()]
+                exc_str = config.get("General", "exclude", fallback=""); excludes = [e.strip() for e in exc_str.split(",") if e.strip()]
                 strata.scan_directory(target_path, db, excludes, progress_callback=update_progress)
                 load_chart_data.clear()
                 status_text.empty()
                 st.sidebar.success("Done!"); time.sleep(1); st.rerun()
 
     if not is_new:
-        col_test, col_tasks = st.sidebar.columns(2)
+        # FIX: Restored vertical stacking for action buttons
+        if st.sidebar.button("🔌 Test Connection", use_container_width=True):
+            config = get_config()
+            url = config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL)
+            key = config.get("Server", "key", fallback="")
+            if not url: st.sidebar.error("Server URL missing!")
+            else:
+                with st.spinner("Pinging server..."):
+                    res = strata.test_connection(url, key)
+                    if res["success"]: st.sidebar.success(res["message"])
+                    else: st.sidebar.error(res["message"])
         
-        with col_test:
-            if st.button("🔌 Test Conn.", use_container_width=True): 
-                config = get_config()
-                url = config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL)
-                key = config.get("Server", "key", fallback="")
-                if not url: st.sidebar.error("No URL!")
-                else:
-                    with st.spinner("Pinging..."):
-                        res = strata.test_connection(url, key)
-                        if res["success"]: st.sidebar.success("OK")
-                        else: st.sidebar.error("Fail")
-        
-        with col_tasks:
-            if st.button("🔄 Check Tasks", use_container_width=True):
-                config = get_config()
-                url = config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL)
-                key = config.get("Server", "key", fallback="")
-                db = config.get("General", "db_path", fallback="strata.db")
-                if not url or not key: st.sidebar.error("No Creds")
-                else:
-                    with st.spinner("Checking..."):
-                        res = strata.check_tasks(url, key, db)
-                        st.sidebar.info(res)
+        if st.sidebar.button("🔄 Check Server Tasks", use_container_width=True):
+            config = get_config()
+            url = config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL)
+            key = config.get("Server", "key", fallback="")
+            db = config.get("General", "db_path", fallback="strata.db")
+            if not url or not key: st.sidebar.error("Configure Server & Key in Settings first.")
+            else:
+                with st.spinner("Checking tasks..."):
+                    res = strata.check_tasks(url, key, db)
+                    st.sidebar.info(res)
                         
-    # NEW: Show Update Notification if available
+    # Show Update Notification if available
     st.sidebar.divider()
     update_info = get_update_info(strata.__VERSION__)
     if update_info and update_info.get("has_update"):
@@ -309,7 +306,7 @@ def view_settings():
     chat_debug = st.checkbox("Enable Chat Debug Log (chat_debug.log)", value=config.getboolean("General", "chat_debug", fallback=False))
     st.divider()
     st.subheader("☁️ Strata Cloud Server")
-    server_url = st.text_input("Server URL (Endpoint /sync)", value=config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL))
+    server_url = st.text_input("Server URL (Endpoint /sync)", value=config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL), placeholder="http://<server-ip>:8000/api/v1/agent/sync")
     server_key = st.text_input("Server API Key", config.get("Server", "key", fallback=""), type="password")
     if st.button("Save"):
         if "General" not in config: config["General"] = {}
