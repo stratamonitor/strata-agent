@@ -10,12 +10,10 @@ from datetime import datetime, timezone
 import strata
 from PIL import Image
 
-# FAVICON SVG (Encoded URL for Streamlit workaround)
 FAVICON_SVG = """
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22 fill=%22%230d6efd%22><path d=%22M14 10a1 1 0 0 1 1 1v1a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1v-1a1 1 0 0 1 1-1h12zM2 9a2 2 0 0 0-2 2v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1a2 2 0 0 0-2-2H2z%22/><path d=%22M5 11.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0zm-2 0a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0zM14 3a1 1 0 0 1 1 1v1a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h12zM2 2a2 2 0 0 0-2 2v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H2z%22/><path d=%22M5 4.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0zm-2 0a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z%22/></svg>">
 """
 
-# Try to load PNG icon for browser tab
 icon = "💾"
 if os.path.exists("app.png"):
     try: icon = Image.open("app.png")
@@ -24,7 +22,6 @@ if os.path.exists("app.png"):
 st.set_page_config(page_title=f"Strata v{strata.__VERSION__}", page_icon=icon, layout="wide")
 st.markdown(FAVICON_SVG, unsafe_allow_html=True) 
 
-# CSS HACK: Make alerts more compact
 st.markdown("""
     <style>
     div[data-testid="stAlert"] {
@@ -97,6 +94,65 @@ def load_chart_data(db_path, scan_id, total_size):
     finally: conn.close()
     return df
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_diff_chart_data(db_path, old_scan_id, new_scan_id):
+    conn = sqlite3.connect(db_path)
+    try:
+        # Fetch intrinsic size_bytes to construct a mathematically correct diff tree
+        q_old = f"SELECT path, parent_path, depth, size_bytes as old_size FROM directories WHERE scan_id = {old_scan_id}"
+        old_df = pd.read_sql(q_old, conn)
+        
+        q_new = f"SELECT path, parent_path, depth, size_bytes as new_size FROM directories WHERE scan_id = {new_scan_id}"
+        new_df = pd.read_sql(q_new, conn)
+    finally: conn.close()
+
+    # Merge directories, treating missing as size 0 (created or deleted)
+    df = pd.merge(old_df, new_df, on='path', how='outer', suffixes=('_old', '_new'))
+    
+    # Coalesce parent structure
+    df['parent_path'] = df['parent_path_new'].combine_first(df['parent_path_old'])
+    df['depth'] = df['depth_new'].combine_first(df['depth_old'])
+    
+    df['old_size'] = df['old_size'].fillna(0)
+    df['new_size'] = df['new_size'].fillna(0)
+    df['diff'] = df['new_size'] - df['old_size']
+
+    # 1. Increase Tree (Grown)
+    df_inc = df[['path', 'parent_path', 'depth', 'diff']].copy()
+    df_inc['diff'] = df_inc['diff'].clip(lower=0) 
+
+    # 2. Decrease Tree (Shrunk)
+    df_dec = df[['path', 'parent_path', 'depth', 'diff']].copy()
+    df_dec['diff'] = (-df_dec['diff']).clip(lower=0)
+
+    def build_diff_tree(d):
+        """Propagates intrinsic diffs bottom-up to create a valid hierarchy"""
+        d = d.sort_values('depth', ascending=False)
+        subtree_dict = d.set_index('path')['diff'].to_dict()
+        
+        for path, parent in zip(d['path'], d['parent_path']):
+            if parent and parent in subtree_dict:
+                subtree_dict[parent] += subtree_dict[path]
+        
+        d['subtree_size'] = d['path'].map(subtree_dict)
+        return d[d['subtree_size'] > 0].copy()
+
+    df_inc = build_diff_tree(df_inc)
+    df_dec = build_diff_tree(df_dec)
+
+    # Noise filter (0.05%)
+    if not df_inc.empty:
+        root_inc = df_inc[df_inc['parent_path'] == '']['subtree_size'].max()
+        if pd.notna(root_inc) and root_inc > 0:
+            df_inc = df_inc[df_inc['subtree_size'] > root_inc * 0.0005]
+
+    if not df_dec.empty:
+        root_dec = df_dec[df_dec['parent_path'] == '']['subtree_size'].max()
+        if pd.notna(root_dec) and root_dec > 0:
+            df_dec = df_dec[df_dec['subtree_size'] > root_dec * 0.0005]
+
+    return df_inc, df_dec
+
 def get_targets(conn):
     try: return pd.read_sql("SELECT DISTINCT root_path FROM scans ORDER BY root_path", conn)['root_path'].tolist()
     except: return[]
@@ -104,7 +160,6 @@ def get_targets(conn):
 def get_snapshots(conn, root_path):
     return pd.read_sql("SELECT id, timestamp, total_size_bytes, disk_total_bytes, disk_free_bytes FROM scans WHERE root_path = ? ORDER BY id DESC", conn, params=(root_path,))
 
-# Cached Update Checker (TTL 1 Hour)
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_update_info(current_version):
     return strata.check_for_updates(current_version)
@@ -113,7 +168,8 @@ def render_sidebar(conn):
     st.sidebar.title(f"Strata v{strata.__VERSION__}")
     
     if "navigation" not in st.session_state: st.session_state.navigation = "Dashboard"
-    page = st.sidebar.radio("Go to", ["Dashboard", "💬 Chat", "Settings"], key="navigation")
+    # NEW: Added Diff View to navigation
+    page = st.sidebar.radio("Go to", ["Dashboard", "🔍 Diff View", "💬 Chat", "Settings"], key="navigation")
     st.sidebar.divider()
 
     targets = get_targets(conn); options = targets + ["➕ New Scan..."]
@@ -125,7 +181,7 @@ def render_sidebar(conn):
     
     st.sidebar.subheader("Actions")
     
-    if st.sidebar.button("Scan Now" if not is_new else "Start Initial Scan", type="primary" if is_new else "secondary"):
+    if st.sidebar.button("Scan Now" if not is_new else "Start Initial Scan", type="primary" if is_new else "secondary", use_container_width=True):
         if not target_path: st.sidebar.error("Empty path!")
         else:
             status_text = st.sidebar.empty()
@@ -134,14 +190,13 @@ def render_sidebar(conn):
 
             with st.spinner(f"Scanning {target_path}..."):
                 config = get_config(); db = config.get("General", "db_path", fallback="strata.db")
-                exc_str = config.get("General", "exclude", fallback=""); excludes = [e.strip() for e in exc_str.split(",") if e.strip()]
+                exc_str = config.get("General", "exclude", fallback=""); excludes =[e.strip() for e in exc_str.split(",") if e.strip()]
                 strata.scan_directory(target_path, db, excludes, progress_callback=update_progress)
                 load_chart_data.clear()
                 status_text.empty()
                 st.sidebar.success("Done!"); time.sleep(1); st.rerun()
 
     if not is_new:
-        # FIX: Restored vertical stacking for action buttons
         if st.sidebar.button("🔌 Test Connection", use_container_width=True):
             config = get_config()
             url = config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL)
@@ -164,7 +219,6 @@ def render_sidebar(conn):
                     res = strata.check_tasks(url, key, db)
                     st.sidebar.info(res)
                         
-    # Show Update Notification if available
     st.sidebar.divider()
     update_info = get_update_info(strata.__VERSION__)
     if update_info and update_info.get("has_update"):
@@ -207,7 +261,7 @@ def view_dashboard(conn, target_path):
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Time", format_timestamp_local(full_scan_data['timestamp'])) 
-    c2.metric("Scan Size", format_bytes(full_scan_data['total_size_bytes']))
+    c2.metric("Logical Size", format_bytes(full_scan_data['total_size_bytes']), help="Sum of all file sizes. May exceed Physical Usage if your storage uses Data Deduplication or Compression.")
     c3.metric("Files", f"{full_scan_data['total_files']:,}")
     c4.metric("Duration", format_duration(full_scan_data['scan_duration_sec']))
     
@@ -234,13 +288,7 @@ def view_dashboard(conn, target_path):
             df = load_chart_data(db_path, scan_id, full_scan_data['total_size_bytes'])
             if not df.empty:
                 csv_data = df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Download CSV",
-                    data=csv_data,
-                    file_name=f"strata_scan_{scan_id}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
+                st.download_button("Download CSV", data=csv_data, file_name=f"strata_scan_{scan_id}.csv", mime="text/csv", use_container_width=True)
 
     with st.spinner("Rendering chart..."):
         if not df.empty:
@@ -256,6 +304,74 @@ def view_dashboard(conn, target_path):
             fig.update_layout(margin=dict(t=40, l=10, r=10, b=10), height=700, coloraxis_colorbar=dict(title="Size", tickformat="s"))
             st.plotly_chart(fig, width="stretch")
         else: st.warning("No data.")
+
+# NEW: Diff View Module
+def view_diff(conn, target_path):
+    st.header(f"Diff View: {target_path}")
+    snapshots = get_snapshots(conn, target_path)
+    
+    if len(snapshots) < 2:
+        st.info("You need at least 2 snapshots of this target to perform a Diff comparison.")
+        return
+        
+    snapshots['label'] = snapshots.apply(lambda x: f"{format_timestamp_local(x['timestamp'])} ({format_bytes(x['total_size_bytes'])})", axis=1)
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        old_label = st.selectbox("Old Snapshot (Baseline)", snapshots['label'], index=1)
+    with c2:
+        new_label = st.selectbox("New Snapshot", snapshots['label'], index=0)
+        
+    old_id = snapshots[snapshots['label'] == old_label].iloc[0]['id']
+    new_id = snapshots[snapshots['label'] == new_label].iloc[0]['id']
+
+    if old_id == new_id:
+        st.warning("Please select two different snapshots to compare.")
+        return
+
+    with st.spinner("Calculating absolute differences..."):
+        db_path = get_db_path()
+        df_inc, df_dec = load_diff_chart_data(db_path, old_id, new_id)
+
+    st.divider()
+    
+    v_col1, v_col2 = st.columns([6, 6])
+    with v_col1:
+        chart_type = st.radio("Chart Type",["Sunburst", "Treemap"], horizontal=True, label_visibility="collapsed", key="diff_chart")
+    with v_col2:
+        show_labels = st.checkbox("Labels", value=True, key="diff_labels")
+
+    col_inc, col_dec = st.columns(2)
+
+    def plot_diff_chart(df, title, color_scale):
+        if df.empty:
+            st.info(f"No {title.lower()} detected.")
+            return
+            
+        df['formatted_size'] = df['subtree_size'].apply(lambda x: "+" + format_bytes(x) if "Increase" in title else "-" + format_bytes(x))
+        df['short_name'] = df['path'].apply(lambda p: os.path.basename(p) if p != "/" and p != "" else "ROOT")
+        
+        # Determine total diff for the title
+        root_val = df[df['parent_path'] == '']['subtree_size'].sum()
+        
+        st.subheader(f"{title}: {format_bytes(root_val)}")
+        
+        if "Sunburst" in chart_type:
+            fig = px.sunburst(df, names='path', parents='parent_path', values='subtree_size', branchvalues='total', maxdepth=3, color='subtree_size', color_continuous_scale=color_scale, custom_data=['formatted_size', 'short_name'])
+        else:
+            fig = px.treemap(df, names='path', parents='parent_path', values='subtree_size', branchvalues='total', maxdepth=3, color='subtree_size', color_continuous_scale=color_scale, custom_data=['formatted_size', 'short_name'])
+        
+        template = '%{customdata[1]}<br>%{customdata[0]}' if show_labels else '%{customdata[1]}'
+        fig.update_traces(texttemplate=template, hovertemplate='<b>%{label}</b><br>Diff: %{customdata[0]}<br>Path: %{id}<extra></extra>')
+        fig.update_layout(margin=dict(t=20, l=10, r=10, b=10), height=500, coloraxis_showscale=False)
+        st.plotly_chart(fig, width="stretch")
+
+    with col_inc:
+        # Green scale for growth
+        plot_diff_chart(df_inc, "Total Increase", px.colors.sequential.Greens)
+    with col_dec:
+        # Red scale for shrinkage
+        plot_diff_chart(df_dec, "Total Decrease", px.colors.sequential.Reds)
 
 def view_chat():
     st.header("💬 AI Storage Assistant")
@@ -332,6 +448,10 @@ def main():
     if page == "Dashboard":
         if is_new: st.info("Start Initial Scan")
         elif conn: view_dashboard(conn, target_path)
+    # NEW: Diff View router
+    elif page == "🔍 Diff View":
+        if conn: view_diff(conn, target_path)
+        else: st.info("Database not initialized.")
     elif page == "💬 Chat":
         if conn: view_chat()
         else: st.info("Database not initialized.")
