@@ -10,10 +10,11 @@ import configparser
 import sys
 import shutil
 import socket
+import re  # NEW: Added for robust version parsing
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-__VERSION__ = "1.2.0"
+__VERSION__ = "1.2.1"
 DEFAULT_SERVER_URL = "https://api.stratamonitor.com/api/v1/agent/sync"
 
 def log(msg):
@@ -69,7 +70,7 @@ def cleanup_retention(db_path, days_to_keep):
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
         cutoff_str = cutoff_date.strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("SELECT id FROM scans WHERE timestamp < ?", (cutoff_str,))
-        scan_ids = [row[0] for row in cursor.fetchall()]
+        scan_ids =[row[0] for row in cursor.fetchall()]
         if not scan_ids:
             conn.close(); return
         log(f"Cleaning up {len(scan_ids)} old scans (older than {days_to_keep} days)...")
@@ -244,7 +245,7 @@ def execute_sql_task(db_path, query):
         cursor = conn.cursor()
         cursor.execute(query)
         rows = cursor.fetchall()
-        result =[dict(row) for row in rows]
+        result = [dict(row) for row in rows]
         conn.close()
         return {"data": result}
     except Exception as e: return {"error": str(e)}
@@ -303,7 +304,7 @@ def check_tasks(api_url, api_key, db_path):
                 else:
                     log(f"Starting Autonomous Report Generation: {prompt}")
                     server_config = {"url": api_url, "key": api_key}
-                    chat_res = run_chat_loop(prompt, [], server_config, db_path, debug_mode=True)
+                    chat_res = run_chat_loop(prompt,[], server_config, db_path, debug_mode=True)
                     if chat_res["success"]: result_data = {"text": chat_res["answer"]}
                     else: result_data = {"error": chat_res.get("message", "Unknown error")}; status = "error"
                 summary.append(f"Task {task_id} (Auto-Chat): {status}")
@@ -386,7 +387,7 @@ def run_chat_loop(user_query, history, server_config, db_path, debug_mode=False)
         else: return {"success": False, "message": f"Unknown server action: {action}"}
     return {"success": False, "message": "Max autonomous iterations reached."}
 
-# NEW: Update Checker Mechanism
+# UPDATED: Robust version checker
 def check_for_updates(current_version):
     """Checks the GitHub API for the latest release tag."""
     try:
@@ -401,19 +402,18 @@ def check_for_updates(current_version):
             
             if not tag_name: 
                 return None
-                
-            latest_v_str = tag_name.lstrip('v')
             
-            # Safe semantic version comparison
-            try:
-                curr_parts = tuple(map(int, current_version.split('.')))
-                latest_parts = tuple(map(int, latest_v_str.split('.')))
-                if latest_parts > curr_parts:
-                    return {"has_update": True, "latest_version": latest_v_str, "url": html_url}
-            except ValueError:
-                # Fallback string comparison if version structure is abnormal
-                if latest_v_str != current_version:
-                    return {"has_update": True, "latest_version": latest_v_str, "url": html_url}
+            # Robust semantic version extraction using Regex
+            def extract_v(v_str):
+                m = re.search(r'(\d+)\.(\d+)(?:\.(\d+))?', v_str)
+                if m: return tuple(int(x) if x else 0 for x in m.groups())
+                return (0,0,0)
+
+            curr_parts = extract_v(current_version)
+            latest_parts = extract_v(tag_name)
+            
+            if latest_parts > curr_parts:
+                return {"has_update": True, "latest_version": tag_name.lstrip('v'), "url": html_url}
                     
             return {"has_update": False}
     except Exception:
@@ -428,10 +428,9 @@ if __name__ == "__main__":
     parser.add_argument("--check-tasks", action="store_true", help="Check server for tasks")
     args = parser.parse_args()
     
-    # NEW: Check for updates before running any CLI command
+    # Check for updates before running any CLI command
     update_info = check_for_updates(__VERSION__)
     if update_info and update_info.get("has_update"):
-        # Print update warning in yellow using ANSI escape codes
         print(f"\033[93m⚠️  UPDATE AVAILABLE: A new version (v{update_info['latest_version']}) is available! Download at: {update_info['url']}\033[0m\n")
     
     excludes = []

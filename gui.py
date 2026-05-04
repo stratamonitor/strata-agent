@@ -84,7 +84,7 @@ def check_password():
         return False
     return True
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_chart_data(db_path, scan_id, total_size):
     threshold = total_size * 0.0005 
     conn = sqlite3.connect(db_path)
@@ -98,7 +98,6 @@ def load_chart_data(db_path, scan_id, total_size):
 def load_diff_chart_data(db_path, old_scan_id, new_scan_id):
     conn = sqlite3.connect(db_path)
     try:
-        # Fetch intrinsic size_bytes to construct a mathematically correct diff tree
         q_old = f"SELECT path, parent_path, depth, size_bytes as old_size FROM directories WHERE scan_id = {old_scan_id}"
         old_df = pd.read_sql(q_old, conn)
         
@@ -106,10 +105,8 @@ def load_diff_chart_data(db_path, old_scan_id, new_scan_id):
         new_df = pd.read_sql(q_new, conn)
     finally: conn.close()
 
-    # Merge directories, treating missing as size 0 (created or deleted)
     df = pd.merge(old_df, new_df, on='path', how='outer', suffixes=('_old', '_new'))
     
-    # Coalesce parent structure
     df['parent_path'] = df['parent_path_new'].combine_first(df['parent_path_old'])
     df['depth'] = df['depth_new'].combine_first(df['depth_old'])
     
@@ -117,16 +114,13 @@ def load_diff_chart_data(db_path, old_scan_id, new_scan_id):
     df['new_size'] = df['new_size'].fillna(0)
     df['diff'] = df['new_size'] - df['old_size']
 
-    # 1. Increase Tree (Grown)
     df_inc = df[['path', 'parent_path', 'depth', 'diff']].copy()
     df_inc['diff'] = df_inc['diff'].clip(lower=0) 
 
-    # 2. Decrease Tree (Shrunk)
     df_dec = df[['path', 'parent_path', 'depth', 'diff']].copy()
     df_dec['diff'] = (-df_dec['diff']).clip(lower=0)
 
     def build_diff_tree(d):
-        """Propagates intrinsic diffs bottom-up to create a valid hierarchy"""
         d = d.sort_values('depth', ascending=False)
         subtree_dict = d.set_index('path')['diff'].to_dict()
         
@@ -140,7 +134,6 @@ def load_diff_chart_data(db_path, old_scan_id, new_scan_id):
     df_inc = build_diff_tree(df_inc)
     df_dec = build_diff_tree(df_dec)
 
-    # Noise filter (0.05%)
     if not df_inc.empty:
         root_inc = df_inc[df_inc['parent_path'] == '']['subtree_size'].max()
         if pd.notna(root_inc) and root_inc > 0:
@@ -160,7 +153,8 @@ def get_targets(conn):
 def get_snapshots(conn, root_path):
     return pd.read_sql("SELECT id, timestamp, total_size_bytes, disk_total_bytes, disk_free_bytes FROM scans WHERE root_path = ? ORDER BY id DESC", conn, params=(root_path,))
 
-@st.cache_data(ttl=3600, show_spinner=False)
+# UPDATED: Reduced cache TTL to 10 minutes (600s) for faster update notifications
+@st.cache_data(ttl=600, show_spinner=False)
 def get_update_info(current_version):
     return strata.check_for_updates(current_version)
 
@@ -168,8 +162,7 @@ def render_sidebar(conn):
     st.sidebar.title(f"Strata v{strata.__VERSION__}")
     
     if "navigation" not in st.session_state: st.session_state.navigation = "Dashboard"
-    # NEW: Added Diff View to navigation
-    page = st.sidebar.radio("Go to", ["Dashboard", "🔍 Diff View", "💬 Chat", "Settings"], key="navigation")
+    page = st.sidebar.radio("Go to",["Dashboard", "🔍 Diff View", "💬 Chat", "Settings"], key="navigation")
     st.sidebar.divider()
 
     targets = get_targets(conn); options = targets + ["➕ New Scan..."]
@@ -245,7 +238,7 @@ def view_dashboard(conn, target_path):
             st.error(f"{error_count} errors during scan.", icon="⚠️")
         with ec2:
             err_df = pd.read_sql(f"SELECT path, error_message FROM scan_errors WHERE scan_id = {scan_id}", conn)
-            log_lines = []
+            log_lines =[]
             for i, r in err_df.iterrows():
                 msg = r['error_message']
                 if ": '" in msg: msg = msg.split(": '")[0]
@@ -305,7 +298,6 @@ def view_dashboard(conn, target_path):
             st.plotly_chart(fig, width="stretch")
         else: st.warning("No data.")
 
-# NEW: Diff View Module
 def view_diff(conn, target_path):
     st.header(f"Diff View: {target_path}")
     snapshots = get_snapshots(conn, target_path)
@@ -351,9 +343,7 @@ def view_diff(conn, target_path):
         df['formatted_size'] = df['subtree_size'].apply(lambda x: "+" + format_bytes(x) if "Increase" in title else "-" + format_bytes(x))
         df['short_name'] = df['path'].apply(lambda p: os.path.basename(p) if p != "/" and p != "" else "ROOT")
         
-        # Determine total diff for the title
         root_val = df[df['parent_path'] == '']['subtree_size'].sum()
-        
         st.subheader(f"{title}: {format_bytes(root_val)}")
         
         if "Sunburst" in chart_type:
@@ -367,11 +357,11 @@ def view_diff(conn, target_path):
         st.plotly_chart(fig, width="stretch")
 
     with col_inc:
-        # Green scale for growth
-        plot_diff_chart(df_inc, "Total Increase", px.colors.sequential.Greens)
+        # UPDATED: Increase = Red
+        plot_diff_chart(df_inc, "Total Increase", px.colors.sequential.Reds)
     with col_dec:
-        # Red scale for shrinkage
-        plot_diff_chart(df_dec, "Total Decrease", px.colors.sequential.Reds)
+        # UPDATED: Decrease = Green
+        plot_diff_chart(df_dec, "Total Decrease", px.colors.sequential.Greens)
 
 def view_chat():
     st.header("💬 AI Storage Assistant")
@@ -422,7 +412,7 @@ def view_settings():
     chat_debug = st.checkbox("Enable Chat Debug Log (chat_debug.log)", value=config.getboolean("General", "chat_debug", fallback=False))
     st.divider()
     st.subheader("☁️ Strata Cloud Server")
-    server_url = st.text_input("Server URL (Endpoint /sync)", value=config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL), placeholder="http://<server-ip>:8000/api/v1/agent/sync")
+    server_url = st.text_input("Server URL (Endpoint /sync)", value=config.get("Server", "url", fallback=strata.DEFAULT_SERVER_URL))
     server_key = st.text_input("Server API Key", config.get("Server", "key", fallback=""), type="password")
     if st.button("Save"):
         if "General" not in config: config["General"] = {}
@@ -448,7 +438,6 @@ def main():
     if page == "Dashboard":
         if is_new: st.info("Start Initial Scan")
         elif conn: view_dashboard(conn, target_path)
-    # NEW: Diff View router
     elif page == "🔍 Diff View":
         if conn: view_diff(conn, target_path)
         else: st.info("Database not initialized.")
