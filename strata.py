@@ -10,11 +10,11 @@ import configparser
 import sys
 import shutil
 import socket
-import re  # NEW: Added for robust version parsing
+import re
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-__VERSION__ = "1.2.1"
+__VERSION__ = "1.2.2"
 DEFAULT_SERVER_URL = "https://api.stratamonitor.com/api/v1/agent/sync"
 
 def log(msg):
@@ -70,7 +70,7 @@ def cleanup_retention(db_path, days_to_keep):
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
         cutoff_str = cutoff_date.strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("SELECT id FROM scans WHERE timestamp < ?", (cutoff_str,))
-        scan_ids =[row[0] for row in cursor.fetchall()]
+        scan_ids = [row[0] for row in cursor.fetchall()]
         if not scan_ids:
             conn.close(); return
         log(f"Cleaning up {len(scan_ids)} old scans (older than {days_to_keep} days)...")
@@ -236,9 +236,15 @@ def test_connection(api_url, api_key):
             return {"success": True, "message": "Connection Established!", "code": 200} if response.status == 200 else {"success": False, "message": f"Status {response.status}"}
     except Exception as e: return {"success": False, "message": str(e)}
 
+# UPDATED: Allow WITH clauses for Common Table Expressions (CTEs)
 def execute_sql_task(db_path, query):
     if not query: return {"error": "Received empty SQL query from server."}
-    if not query.strip().upper().startswith("SELECT"): return {"error": "Only SELECT queries are allowed."}
+    
+    # Clean the query and check if it starts with SELECT or WITH
+    cleaned_query = query.strip().upper()
+    if not (cleaned_query.startswith("SELECT") or cleaned_query.startswith("WITH")): 
+        return {"error": "Only SELECT or WITH queries are allowed."}
+        
     try:
         conn = get_db_connection(db_path)
         conn.row_factory = sqlite3.Row
@@ -387,13 +393,11 @@ def run_chat_loop(user_query, history, server_config, db_path, debug_mode=False)
         else: return {"success": False, "message": f"Unknown server action: {action}"}
     return {"success": False, "message": "Max autonomous iterations reached."}
 
-# UPDATED: Robust version checker
 def check_for_updates(current_version):
     """Checks the GitHub API for the latest release tag."""
     try:
         url = "https://api.github.com/repos/stratamonitor/strata-agent/releases/latest"
         req = urllib.request.Request(url, headers={'User-Agent': f'StrataClient/{current_version}'})
-        # Timeout set to 2 seconds to not block disconnected servers
         with urllib.request.urlopen(req, timeout=2) as response:
             data = json.loads(response.read().decode('utf-8'))
             
@@ -403,7 +407,6 @@ def check_for_updates(current_version):
             if not tag_name: 
                 return None
             
-            # Robust semantic version extraction using Regex
             def extract_v(v_str):
                 m = re.search(r'(\d+)\.(\d+)(?:\.(\d+))?', v_str)
                 if m: return tuple(int(x) if x else 0 for x in m.groups())
@@ -417,7 +420,6 @@ def check_for_updates(current_version):
                     
             return {"has_update": False}
     except Exception:
-        # Ignore network errors, rate limits, or isolated environments silently
         return None
 
 if __name__ == "__main__":
@@ -428,7 +430,6 @@ if __name__ == "__main__":
     parser.add_argument("--check-tasks", action="store_true", help="Check server for tasks")
     args = parser.parse_args()
     
-    # Check for updates before running any CLI command
     update_info = check_for_updates(__VERSION__)
     if update_info and update_info.get("has_update"):
         print(f"\033[93m⚠️  UPDATE AVAILABLE: A new version (v{update_info['latest_version']}) is available! Download at: {update_info['url']}\033[0m\n")
